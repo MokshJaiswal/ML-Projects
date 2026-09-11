@@ -1,0 +1,135 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: >
+      Conformed monthly date dimension. Mark this as the date table in Power BI
+      so time-intelligence DAX resolves correctly.
+    columns:
+      - name: date_key
+        description: Primary key. Month start date.
+        tests: [unique, not_null]
+      - name: fiscal_year
+        description: Canadian bank fiscal year, beginning 1 November.
+        tests: [not_null]
+
+  - name: dim_product
+    description: Product catalogue with reporting groupings.
+    columns:
+      - name: product_key
+        tests: [unique, not_null]
+      - name: product_category
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['Real Estate Secured', 'Secured Instalment', 'Unsecured Revolving']
+
+  - name: dim_geography
+    description: Province and census metropolitan area, with latest regional macro.
+    columns:
+      - name: geography_key
+        tests: [unique, not_null]
+      - name: province_code
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['ON', 'BC', 'AB', 'QC', 'MB', 'SK', 'NS', 'NB']
+
+  - name: dim_borrower
+    description: One row per borrower, attributes as-at origination.
+    columns:
+      - name: borrower_key
+        tests: [unique, not_null]
+      - name: credit_risk_band
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['A_SUPER_PRIME', 'B_PRIME', 'C_NEAR_PRIME', 'D_SUBPRIME', 'E_DEEP_SUBPRIME']
+      - name: credit_score_at_origination
+        tests:
+          - dbt_utils_between:
+              arguments:
+                min_value: 300
+                max_value: 900
+
+  - name: dim_account
+    description: One row per credit facility, denormalised with borrower attributes.
+    columns:
+      - name: account_key
+        tests: [unique, not_null]
+      - name: borrower_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_borrower')
+                field: borrower_key
+      - name: product_key
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_product')
+                field: product_key
+      - name: origination_rate_era
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['PRE_PANDEMIC', 'LOW_RATE_ERA', 'TIGHTENING', 'HIGH_RATE_ERA']
+
+  - name: fact_account_month
+    description: >
+      Central fact at account-month grain. Ratios are intentionally absent -
+      they are DAX measures so they remain correct under every filter context.
+    tests:
+      - dbt_utils_unique_combination:
+          arguments:
+            combination_of_columns: ['account_key', 'date_key']
+    columns:
+      - name: account_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_account')
+                field: account_key
+      - name: date_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: balance_cad
+        description: Outstanding balance. Must never be negative.
+        tests:
+          - not_null
+          - dbt_utils_between:
+              arguments:
+                min_value: 0
+                max_value: 5000000
+      - name: delinquency_state
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['CURRENT', 'DPD_30', 'DPD_60', 'DPD_90', 'DPD_120', 'DEFAULT']
+
+  - name: agg_portfolio_monthly
+    description: Portfolio summary by month, product, province, vintage and risk band.
+    columns:
+      - name: snapshot_month
+        tests: [not_null]
+
+  - name: agg_renewal_exposure
+    description: >
+      Forward-looking payment shock for facilities that have not yet repriced.
+      This is the table the executive recommendation is built from.
+    columns:
+      - name: account_key
+        tests: [unique, not_null]
+      - name: projected_shock_band
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['SEVERE_OVER_40', 'HIGH_25_40', 'MODERATE_10_25', 'MILD_0_10', 'NONE_OR_BENEFIT']

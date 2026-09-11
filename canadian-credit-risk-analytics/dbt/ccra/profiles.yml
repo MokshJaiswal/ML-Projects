@@ -1,0 +1,10 @@
+# Local profile. `dbt` is invoked with --profiles-dir . from the Makefile, so no
+# ~/.dbt setup is required for a fresh clone.
+ccra:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "../../data/warehouse/ccra.duckdb"
+      threads: 4
+      extensions: []

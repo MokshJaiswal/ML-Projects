@@ -1,0 +1,25 @@
+name: ccra
+version: "1.0.0"
+config-version: 2
+profile: ccra
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  ccra:
+    staging:
+      +materialized: view
+      +schema: staging
+    intermediate:
+      +materialized: view
+      +schema: intermediate
+    marts:
+      +materialized: table
+      +schema: marts
+
+vars:
+  # Reporting currency and the as-of month the dashboard defaults to.
+  reporting_currency: CAD

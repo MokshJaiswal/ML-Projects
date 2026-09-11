@@ -1,0 +1,132 @@
+# CCRA pipeline configuration
+# Every tunable lives here so the pipeline is reproducible from config alone.
+
+project:
+  name: canadian-credit-risk-analytics
+  code: CCRA
+  owner: "Retail Credit Risk Analytics"
+
+paths:
+  raw: data/raw
+  staged: data/staged
+  warehouse: data/warehouse/ccra.duckdb
+  exports: data/exports
+
+# ---------------------------------------------------------------------------
+# Observation window. The renewal-cliff analysis needs origination history that
+# predates the tightening cycle plus a forward window covering the renewal wave.
+# ---------------------------------------------------------------------------
+window:
+  origination_start: "2019-01-01"
+  observation_start: "2023-01-01"
+  observation_end:   "2026-06-30"
+  forecast_end:      "2027-12-31"
+
+# ---------------------------------------------------------------------------
+# Live macro sources. Both are public, keyless JSON APIs.
+#   Bank of Canada Valet : https://www.bankofcanada.ca/valet/docs
+#   Statistics Canada WDS: https://www.statcan.gc.ca/en/developers/wds
+# ---------------------------------------------------------------------------
+macro:
+  # Set to false to run entirely offline on the synthetic scenario generator.
+  use_live_sources: true
+  # If a live fetch fails, fall back to the synthetic scenario instead of
+  # aborting the run. Set false in production-style runs so failures are loud.
+  fallback_to_synthetic: true
+
+  bank_of_canada:
+    base_url: "https://www.bankofcanada.ca/valet"
+    series:
+      policy_rate:        "V39079"       # Target for the overnight rate
+      prime_rate:         "V80691311"    # Chartered bank prime business rate
+      gov_5y_yield:       "BD.CDN.5YR.DQ.YLD"
+      conventional_5y:    "V80691335"    # Conventional mortgage 5-year
+    frequency: monthly
+
+  statcan:
+    base_url: "https://www150.statcan.gc.ca/t1/wds/rest"
+    # Product IDs (PIDs) for the tables we consume.
+    tables:
+      unemployment_rate:       "14100287"  # LFS, monthly, by province
+      cpi_all_items:           "18100004"  # CPI, monthly
+      new_housing_price_index: "18100205"  # NHPI, monthly, by CMA
+      household_debt_to_income: "38100238"  # Credit market debt to disposable income
+    frequency: monthly
+
+# ---------------------------------------------------------------------------
+# Synthetic portfolio. Loan-level data is simulated because no lender publishes
+# account-level performance. Distributions are calibrated to published national
+# aggregates; the generator is seeded so every run is byte-identical.
+# ---------------------------------------------------------------------------
+portfolio:
+  seed: 20260911
+  n_borrowers: 60000
+  # Product mix must sum to 1.0
+  product_mix:
+    MORTGAGE_FIXED_5Y: 0.42
+    MORTGAGE_VARIABLE: 0.18
+    HELOC:             0.14
+    AUTO:              0.13
+    CREDIT_CARD:       0.13
+  # Share of borrowers holding more than one product
+  multi_product_rate: 0.34
+
+  credit_score:
+    mean: 726
+    sd: 78
+    floor: 480
+    ceiling: 900
+
+  regions:
+    # province -> (share of portfolio, unemployment base, HPI volatility)
+    "ON": {share: 0.38, cma: ["Toronto", "Ottawa-Gatineau", "Hamilton", "London"]}
+    "BC": {share: 0.15, cma: ["Vancouver", "Victoria", "Kelowna"]}
+    "AB": {share: 0.14, cma: ["Calgary", "Edmonton"]}
+    "QC": {share: 0.20, cma: ["Montreal", "Quebec City"]}
+    "MB": {share: 0.04, cma: ["Winnipeg"]}
+    "SK": {share: 0.03, cma: ["Saskatoon", "Regina"]}
+    "NS": {share: 0.04, cma: ["Halifax"]}
+    "NB": {share: 0.02, cma: ["Moncton"]}
+
+# ---------------------------------------------------------------------------
+# Credit risk model parameters (log-odds contributions to monthly PD hazard).
+# ---------------------------------------------------------------------------
+risk:
+  base_monthly_hazard: 0.0012
+  coefficients:
+    credit_score_per_100:   -0.62   # higher score -> lower risk
+    ltv_per_10pct:           0.18
+    tds_per_10pct:           0.34
+    payment_shock_per_10pct: 0.41   # the renewal cliff driver
+    unemployment_per_1pct:   0.22
+    months_on_book_per_12:  -0.08
+  # Calibrated so that 42-month cumulative default by product lands near
+  # published Canadian norms (mortgage ~0.5%, HELOC ~0.8%, auto ~3%, card ~5%).
+  product_intercept:
+    MORTGAGE_FIXED_5Y: -0.85
+    MORTGAGE_VARIABLE: -0.60
+    HELOC:              0.36
+    AUTO:               2.45
+    CREDIT_CARD:        2.88
+  # Delinquency roll-rate state machine
+  cure_rate:
+    DPD_30:  0.58
+    DPD_60:  0.31
+    DPD_90:  0.14
+    DPD_120: 0.05
+  loss_given_default:
+    MORTGAGE_FIXED_5Y: 0.18
+    MORTGAGE_VARIABLE: 0.18
+    HELOC:             0.35
+    AUTO:              0.45
+    CREDIT_CARD:       0.85
+
+# ---------------------------------------------------------------------------
+# Data quality thresholds enforced before anything reaches the mart layer.
+# A run that breaches a `severity: error` rule exits non-zero.
+# ---------------------------------------------------------------------------
+quality:
+  max_null_rate:              0.00   # on declared not-null columns
+  max_duplicate_rate:         0.00
+  reconciliation_tolerance:   0.005  # 0.5% between fact totals and source
+  min_row_count:              100000

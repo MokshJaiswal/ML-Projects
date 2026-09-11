@@ -1,0 +1,20 @@
+version: 2
+
+sources:
+  - name: landing
+    description: >
+      Raw tables loaded verbatim from the Python pipeline. Nothing downstream
+      reads these directly; staging models are the only consumers.
+    schema: landing
+    tables:
+      - name: raw_macro
+        description: Macro indicators from Bank of Canada and Statistics Canada.
+        columns:
+          - name: source
+            description: >
+              Provenance. `bank_of_canada` / `statcan` are published statistics;
+              `synthetic_scenario` is a generated stress path used when the live
+              APIs are unreachable.
+      - name: raw_borrowers
+      - name: raw_accounts
+      - name: raw_account_month

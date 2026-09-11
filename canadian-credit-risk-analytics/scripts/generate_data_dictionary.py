@@ -1,0 +1,142 @@
+"""Regenerate docs/03-data-dictionary.md from the live warehouse schema.
+
+Reading `information_schema` rather than hand-maintaining the document means the
+data dictionary cannot drift from the model. Run after any schema change:
+
+    python scripts/generate_data_dictionary.py
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import duckdb
+
+REPO = Path(__file__).resolve().parents[1]
+DB = REPO / "data" / "warehouse" / "ccra.duckdb"
+OUT = REPO / "docs" / "03-data-dictionary.md"
+MART_SCHEMA = "main_marts"
+
+TABLE_DESCRIPTIONS = {
+    "dim_date": "Conformed monthly date dimension. Mark as the date table in Power BI.",
+    "dim_borrower": "One row per borrower. Attributes are as-at origination.",
+    "dim_account": "One row per credit facility, denormalised with borrower attributes.",
+    "dim_geography": "Province and census metropolitan area, with latest regional macro readings.",
+    "dim_product": "Product catalogue with reporting groupings.",
+    "fact_account_month": "Central fact. Grain: one row per account per reporting month.",
+    "agg_portfolio_monthly": "Portfolio summary by month, product, province, vintage and risk band.",
+    "agg_renewal_exposure": "Forward-looking payment shock for facilities not yet repriced.",
+}
+
+COLUMN_NOTES = {
+    "balance_cad": "Outstanding balance. Additive across every dimension.",
+    "delinquent_balance_cad": "Balance where state <> CURRENT. Numerator for the balance-weighted delinquency rate.",
+    "impaired_balance_cad": "Balance 90+ DPD or defaulted (BR-01).",
+    "defaulted_balance_cad": "Balance in the absorbing DEFAULT state.",
+    "payment_shock_pct": "Realised payment increase at renewal: new payment / original payment - 1.",
+    "projected_payment_shock_pct": "Projected increase at the assumed renewal rate, for facilities not yet repriced.",
+    "projected_shock_band": "Severity banding of projected shock (BR-05).",
+    "monthly_pd": "Modelled monthly probability of entering delinquency.",
+    "expected_loss_cad": "Modelled expected credit loss = exposure x PD x LGD.",
+    "credit_risk_band": "BR-03 banding of credit score at origination.",
+    "origination_rate_era": "Rate environment at origination. LOW_RATE_ERA carries the renewal risk.",
+    "is_renewable": "True where term < amortisation, so the facility reprices rather than maturing.",
+    "is_impaired": "90+ days past due or defaulted (BR-01).",
+    "is_delinquent": "Any state other than CURRENT (BR-02).",
+    "geography_key": "MD5 surrogate key over (province_code, cma_name).",
+    "data_source": "Provenance: bank_of_canada / statcan are published; synthetic_scenario is generated.",
+    "delinquency_state": "CURRENT, DPD_30, DPD_60, DPD_90, DPD_120 or DEFAULT. DEFAULT is absorbing.",
+    "assumed_renewal_rate_pct": "Latest observed conventional 5-year rate, used as the repricing assumption (BR-08).",
+}
+
+DQ_NOTES = {
+    "rule_name": "Rule identifier.",
+    "dimension": "completeness | uniqueness | validity | consistency | reconciliation",
+    "severity": "error breaches stop the build; warn are recorded only.",
+    "metric_value": "Measured value.",
+    "threshold": "Configured limit from config/pipeline.yml.",
+    "direction": "max: pass when metric <= threshold. min: pass when metric >= threshold.",
+    "passed": "Rule outcome.",
+    "description": "What the rule protects against.",
+    "run_timestamp_utc": "Pipeline run that produced this result.",
+}
+
+
+def default_note(column: str) -> str:
+    """Fall back to a note inferred from the column's naming convention."""
+    if column.endswith("_key"):
+        return "Surrogate key."
+    if column.endswith("_cad"):
+        return "Amount in CAD."
+    if column.endswith("_pct"):
+        return "Percentage, expressed as a decimal where it is a ratio."
+    if column.startswith("is_"):
+        return "Boolean flag."
+    return ""
+
+
+def emit_columns(con, schema: str, table: str, notes: dict[str, str], out: list[str]) -> None:
+    out.append("| Column | Type | Notes |")
+    out.append("|---|---|---|")
+    columns = con.execute(
+        "SELECT column_name, data_type FROM information_schema.columns "
+        "WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position",
+        [schema, table],
+    ).fetchall()
+    for column, dtype in columns:
+        note = notes.get(column) or default_note(column)
+        out.append(f"| `{column}` | {dtype} | {note} |")
+    out.append("")
+
+
+def main() -> int:
+    if not DB.exists():
+        print(f"Warehouse not found at {DB}. Run `make all` first.", file=sys.stderr)
+        return 1
+
+    con = duckdb.connect(str(DB), read_only=True)
+    out: list[str] = [
+        "# Data dictionary — CCRA marts",
+        "",
+        "| | |",
+        "|---|---|",
+        "| **Document ID** | CCRA-DD-001 |",
+        "| **Generated** | From the live warehouse schema |",
+        "",
+        "Generated by `scripts/generate_data_dictionary.py` directly from",
+        "`information_schema`, so it cannot drift from the actual model.",
+        "Regenerate after any schema change.",
+        "",
+        "Business rule references (BR-nn) point to `02-business-requirements.md`.",
+        "",
+        "---",
+        "",
+    ]
+
+    tables = [
+        r[0] for r in con.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = ? "
+            "ORDER BY CASE WHEN table_name LIKE 'dim%' THEN 1 "
+            "WHEN table_name LIKE 'fact%' THEN 2 ELSE 3 END, table_name",
+            [MART_SCHEMA],
+        ).fetchall()
+    ]
+
+    for table in tables:
+        rows = con.execute(f"SELECT count(*) FROM {MART_SCHEMA}.{table}").fetchone()[0]
+        out += [f"## `{table}`", "", TABLE_DESCRIPTIONS.get(table, ""), "",
+                f"**Rows:** {rows:,}", ""]
+        emit_columns(con, MART_SCHEMA, table, COLUMN_NOTES, out)
+
+    out += ["---", "", "## Quality results", "", "### `quality.dq_results`", "",
+            "One row per rule per pipeline run. Quality as a time series.", ""]
+    emit_columns(con, "quality", "dq_results", DQ_NOTES, out)
+
+    OUT.write_text("\n".join(out), encoding="utf-8")
+    print(f"Wrote {OUT.relative_to(REPO)} — {len(tables)} mart tables documented.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

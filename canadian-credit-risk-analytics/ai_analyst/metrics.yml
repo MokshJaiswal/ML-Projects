@@ -1,0 +1,118 @@
+# Semantic contract for the AI analyst.
+#
+# Every metric the agent can compute is declared here, with the exact SQL that
+# defines it. The agent composes from this catalogue; it does not write free-form
+# SQL against the warehouse. That constraint is the whole point: it makes the
+# agent's answers reproducible and reviewable, and it means a metric can only
+# ever mean one thing.
+
+version: 1
+
+connection:
+  path: ../data/warehouse/ccra.duckdb
+  read_only: true
+  schema: main_marts
+
+# Dimensions the agent may group by or filter on.
+dimensions:
+  snapshot_month:      {table: dim_date,      column: date_key,             type: date}
+  calendar_year:       {table: dim_date,      column: calendar_year,        type: integer}
+  product_name:        {table: dim_product,   column: product_name,         type: string}
+  product_category:    {table: dim_product,   column: product_category,     type: string}
+  province_code:       {table: dim_account,   column: province_code,        type: string}
+  cma_name:            {table: dim_account,   column: cma_name,             type: string}
+  credit_risk_band:    {table: dim_account,   column: credit_risk_band,     type: string}
+  income_band:         {table: dim_account,   column: income_band,          type: string}
+  origination_rate_era:{table: dim_account,   column: origination_rate_era, type: string}
+  ltv_band:            {table: dim_account,   column: ltv_band,             type: string}
+  employment_type:     {table: dim_account,   column: employment_type,      type: string}
+  is_newcomer:         {table: dim_account,   column: is_newcomer,          type: boolean}
+  delinquency_state:   {table: fact_account_month, column: delinquency_state, type: string}
+  payment_shock_band:  {table: fact_account_month, column: payment_shock_band, type: string}
+
+metrics:
+  total_exposure:
+    label: Total exposure
+    description: Outstanding balance across the portfolio, in CAD.
+    sql: SUM(f.balance_cad)
+    format: currency
+    grain: fact_account_month
+
+  account_count:
+    label: Account count
+    description: Number of open credit facilities.
+    sql: COUNT(*)
+    format: integer
+    grain: fact_account_month
+
+  delinquency_rate:
+    label: Delinquency rate
+    description: >
+      Balance-weighted share of exposure that is past due by any amount.
+      Balance-weighted, not account-weighted: a $900k mortgage and a $2k card
+      are not equally material.
+    sql: SUM(f.delinquent_balance_cad) / NULLIF(SUM(f.balance_cad), 0)
+    format: percent
+    grain: fact_account_month
+
+  impaired_rate:
+    label: Impaired rate
+    description: Share of exposure 90 or more days past due, including defaults.
+    sql: SUM(f.impaired_balance_cad) / NULLIF(SUM(f.balance_cad), 0)
+    format: percent
+    grain: fact_account_month
+
+  expected_loss:
+    label: Expected loss
+    description: Sum of modelled expected credit loss, in CAD.
+    sql: SUM(f.expected_loss_cad)
+    format: currency
+    grain: fact_account_month
+
+  renewing_exposure:
+    label: Renewing exposure
+    description: Balance on renewable facilities that have not yet repriced.
+    sql: SUM(r.balance_cad)
+    format: currency
+    grain: agg_renewal_exposure
+
+  severe_shock_exposure:
+    label: Severe shock exposure
+    description: Renewing balance facing a projected payment increase above 40%.
+    sql: SUM(CASE WHEN r.projected_shock_band = 'SEVERE_OVER_40' THEN r.balance_cad ELSE 0 END)
+    format: currency
+    grain: agg_renewal_exposure
+
+  avg_payment_shock:
+    label: Average payment shock
+    description: >
+      Exposure-weighted mean projected payment increase at renewal. Weighted,
+      because an unweighted average would let a $15k HELOC move the number as
+      much as a $700k mortgage.
+    sql: SUM(r.projected_payment_shock_pct * r.balance_cad) / NULLIF(SUM(r.balance_cad), 0)
+    format: percent
+    grain: agg_renewal_exposure
+
+  monthly_payment_increase:
+    label: Monthly payment increase
+    description: Aggregate additional monthly payment across renewing accounts, in CAD.
+    sql: SUM(r.payment_increase_cad)
+    format: currency
+    grain: agg_renewal_exposure
+
+# Questions the agent must refuse rather than guess at.
+refusals:
+  - condition: error_severity_quality_rule_failed
+    response: >
+      The most recent pipeline run breached an error-severity data quality rule.
+      Reporting figures from this warehouse would be misleading. State which
+      rule failed and decline to give numbers until it is resolved.
+  - condition: metric_not_in_catalogue
+    response: >
+      That metric is not defined in the semantic layer. Say so, list the closest
+      available metrics, and offer to add a definition to metrics.yml rather
+      than composing ad-hoc SQL.
+  - condition: individual_borrower_identification
+    response: >
+      Decline. Portfolio analysis is reported at segment grain. Do not return
+      results for a single identifiable borrower.

@@ -1,0 +1,29 @@
+# Generated data. The pipeline rebuilds all of this deterministically from the
+# seed in config/pipeline.yml, so none of it belongs in version control.
+data/raw/*
+data/staged/*
+data/warehouse/*
+data/exports/*
+!data/**/.gitkeep
+
+# dbt
+dbt/ccra/target/
+dbt/ccra/logs/
+dbt/ccra/dbt_packages/
+.user.yml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Power BI working files
+*.pbix.bak
+~$*
+
+# OS
+.DS_Store
+Thumbs.db

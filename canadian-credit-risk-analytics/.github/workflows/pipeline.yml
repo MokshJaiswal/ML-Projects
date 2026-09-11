@@ -1,0 +1,88 @@
+name: CCRA pipeline
+
+# The portfolio is rebuilt on a schedule so the dashboard tracks the latest
+# Bank of Canada and Statistics Canada releases rather than a frozen snapshot.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # 07:00 UTC on the 3rd of each month — after StatCan's Labour Force Survey
+    # and the Bank of Canada's monthly series have published.
+    - cron: "0 7 3 * *"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ingest macro data
+        run: python -m ccra.pipeline ingest
+        env:
+          PYTHONPATH: src
+
+      - name: Simulate portfolio
+        run: python -m ccra.pipeline simulate
+        env:
+          PYTHONPATH: src
+
+      - name: Load warehouse
+        run: python -m ccra.pipeline load
+        env:
+          PYTHONPATH: src
+
+      # The quality gate runs before dbt so a bad load never reaches the marts.
+      - name: Data quality gate
+        run: python -m ccra.pipeline quality
+        env:
+          PYTHONPATH: src
+
+      - name: Build and test star schema
+        working-directory: dbt/ccra
+        run: dbt build --profiles-dir .
+
+      - name: Export Power BI extracts
+        run: python -m ccra.pipeline export
+        env:
+          PYTHONPATH: src
+
+      - name: Publish extracts and quality report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccra-extracts-${{ github.run_number }}
+          path: |
+            data/exports/*.parquet
+            data/exports/*.csv
+          retention-days: 30
+
+      - name: Summarise the run
+        if: always()
+        run: |
+          {
+            echo "## CCRA pipeline run"
+            echo ""
+            if [ -f data/raw/macro_manifest.json ]; then
+              echo "**Macro source mode:** $(python -c "import json;print(json.load(open('data/raw/macro_manifest.json'))['mode'])")"
+            fi
+            echo ""
+            echo "### Data quality"
+            echo ""
+            if [ -f data/exports/data_quality_results.csv ]; then
+              echo '```'
+              column -s, -t < data/exports/data_quality_results.csv | cut -c1-140
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
